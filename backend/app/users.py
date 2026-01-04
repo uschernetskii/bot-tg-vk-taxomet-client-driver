@@ -44,13 +44,19 @@ class SetRoleIn(BaseModel):
     external_id: int
     role: str  # client|driver
 
+class SetUiMessageIn(BaseModel):
+    platform: str  # tg|vk
+    external_id: int
+    chat_id: int
+    message_id: int
+
 
 @router.get("/by_tg/{tg_id}", dependencies=[Depends(require_internal)])
 async def by_tg(tg_id: int, request: Request):
     pool = await _get_pool(request)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT tg_id, vk_id, phone, full_name, role FROM users WHERE tg_id=$1",
+            "SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE tg_id=$1",
             tg_id,
         )
         if not row:
@@ -66,13 +72,40 @@ async def by_external(platform: str, external_id: int, request: Request):
     pool = await _get_pool(request)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, role FROM users WHERE {field}=$1",
+            f"SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE {field}=$1",
             external_id,
         )
         if not row:
             raise HTTPException(status_code=404, detail="User not found")
         return dict(row)
 
+
+@router.post("/set_ui_message", dependencies=[Depends(require_internal)])
+async def set_ui_message(payload: SetUiMessageIn, request: Request):
+    if payload.platform not in ("tg", "vk"):
+        raise HTTPException(status_code=400, detail="platform must be tg|vk")
+    field = "tg_id" if payload.platform == "tg" else "vk_id"
+    pool = await _get_pool(request)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"""
+            INSERT INTO users ({field}, ui_chat_id, ui_message_id, updated_at)
+            VALUES ($1, $2, $3, now())
+            ON CONFLICT ({field})
+            DO UPDATE SET
+                ui_chat_id=EXCLUDED.ui_chat_id,
+                ui_message_id=EXCLUDED.ui_message_id,
+                updated_at=now()
+            """,
+            payload.external_id,
+            int(payload.chat_id),
+            int(payload.message_id),
+        )
+        row = await conn.fetchrow(
+            f"SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE {field}=$1",
+            payload.external_id,
+        )
+        return dict(row)
 
 @router.post("/set_phone", dependencies=[Depends(require_internal)])
 async def set_phone(payload: SetPhoneIn, request: Request):
@@ -101,7 +134,7 @@ async def set_phone(payload: SetPhoneIn, request: Request):
             payload.full_name,
         )
         row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, role FROM users WHERE {field}=$1",
+            f"SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE {field}=$1",
             payload.external_id,
         )
         return dict(row)
@@ -133,7 +166,7 @@ async def set_role(payload: SetRoleIn, request: Request):
             payload.external_id,
         )
         row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, role FROM users WHERE {field}=$1",
+            f"SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE {field}=$1",
             payload.external_id,
         )
         return dict(row)

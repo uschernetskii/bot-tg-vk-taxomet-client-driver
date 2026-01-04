@@ -69,6 +69,9 @@ async def _ensure_users_schema(pool):
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(16);")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ui_chat_id BIGINT;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ui_message_id BIGINT;")
+
 
         # ВАЖНО:
         # раньше могли быть partial unique indexes с WHERE ... — они НЕ подходят для ON CONFLICT (tg_id)/(vk_id).

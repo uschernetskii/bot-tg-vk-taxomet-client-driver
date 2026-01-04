@@ -108,18 +108,58 @@ def role_label(role: str) -> str:
 async def get_user_tg(tg_id: int):
     return await backend_get(f"/api/users/by_tg/{tg_id}")
 
+async def safe_delete(m: Message):
+    """Best-effort delete user's message to keep chat clean."""
+    try:
+        await m.delete()
+    except Exception:
+        return
+
+
+async def ui_send(m: Message, text: str, reply_markup=None, parse_mode=None):
+    """Keep a single 'UI' bot message: delete previous UI message then send new."""
+    tg_id = int(m.from_user.id)
+    chat_id = int(m.chat.id)
+
+    prev = await get_user_tg(tg_id)
+    if prev:
+        prev_chat = prev.get("ui_chat_id") or chat_id
+        prev_mid = prev.get("ui_message_id")
+        if prev_mid:
+            try:
+                await bot.delete_message(int(prev_chat), int(prev_mid))
+            except Exception:
+                pass
+
+    sent = await bot.send_message(
+        chat_id,
+        text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+        disable_web_page_preview=True,
+    )
+
+    # store last UI message id in backend
+    await backend_post("/api/users/set_ui_message", {
+        "platform": "tg",
+        "external_id": tg_id,
+        "chat_id": chat_id,
+        "message_id": int(sent.message_id),
+    })
+    return sent
+
 
 async def ensure_user(m: Message):
     user = await get_user_tg(m.from_user.id)
     if not user or not user.get("phone"):
-        await m.answer(
+        await ui_send(m, 
             "Чтобы начать работу, отправьте номер телефона (кнопка ниже).\n"
             "Роль можно будет менять в любой момент.",
             reply_markup=kb_phone(),
         )
         return None
     if not user.get("role"):
-        await m.answer("Выберите, кто вы:", reply_markup=inline_choose_role())
+        await ui_send(m, "Выберите, кто вы:", reply_markup=inline_choose_role())
         return None
     return user
 
@@ -127,18 +167,19 @@ async def ensure_user(m: Message):
 async def show_menu(m: Message, user: dict):
     role = user.get("role") or "client"
     if role == "driver":
-        await m.answer(f"Готово ✅ Текущая роль: {role_label(role)}", reply_markup=kb_main_driver())
+        await ui_send(m, f"Готово ✅ Текущая роль: {role_label(role)}", reply_markup=kb_main_driver())
     else:
-        await m.answer(f"Готово ✅ Текущая роль: {role_label(role)}", reply_markup=kb_main_client())
+        await ui_send(m, f"Готово ✅ Текущая роль: {role_label(role)}", reply_markup=kb_main_client())
 
 
 @dp.message(CommandStart())
 async def cmd_start(m: Message):
+    await safe_delete(m)
     tg_id = m.from_user.id
     user = await get_user_tg(tg_id)
 
     if not user or not user.get("phone"):
-        await m.answer(
+        await ui_send(m, 
             "Чтобы начать работу, отправьте номер телефона (кнопка ниже).\n"
             "Роль можно будет менять в любой момент.",
             reply_markup=kb_phone(),
@@ -146,7 +187,7 @@ async def cmd_start(m: Message):
         return
 
     if not user.get("role"):
-        await m.answer("Выберите, кто вы:", reply_markup=inline_choose_role())
+        await ui_send(m, "Выберите, кто вы:", reply_markup=inline_choose_role())
         return
 
     await show_menu(m, user)
@@ -154,27 +195,29 @@ async def cmd_start(m: Message):
 
 @dp.message(F.contact)
 async def on_contact(m: Message):
-    c = m.contact
-    if not c:
-        return
-    if c.user_id and c.user_id != m.from_user.id:
-        await m.answer("Пожалуйста, отправьте *свой* телефон кнопкой ниже.", reply_markup=kb_phone(), parse_mode="Markdown")
-        return
+    try:
+        c = m.contact
+        if not c:
+            return
+        if c.user_id and c.user_id != m.from_user.id:
+            await ui_send(m, "Пожалуйста, отправьте *свой* телефон кнопкой ниже.", reply_markup=kb_phone(), parse_mode="Markdown")
+            return
 
-    await backend_post("/api/users/set_phone", {
-        "platform": "tg",
-        "external_id": int(m.from_user.id),
-        "phone": c.phone_number,
-        "full_name": m.from_user.full_name,
-    })
+        await backend_post("/api/users/set_phone", {
+            "platform": "tg",
+            "external_id": int(m.from_user.id),
+            "phone": c.phone_number,
+            "full_name": m.from_user.full_name,
+        })
 
-    user = await get_user_tg(m.from_user.id)
-    if not user or not user.get("role"):
-        await m.answer("Номер принят ✅ Теперь выберите роль:", reply_markup=inline_choose_role())
-        return
-    await show_menu(m, user)
+        user = await get_user_tg(m.from_user.id)
+        if not user or not user.get("role"):
+            await ui_send(m, "Номер принят ✅ Теперь выберите роль:", reply_markup=inline_choose_role())
+            return
+        await show_menu(m, user)
 
-
+    finally:
+        await safe_delete(m)
 @dp.callback_query(F.data.startswith("role:"))
 async def on_role(cb: CallbackQuery):
     role = cb.data.split(":", 1)[1]
@@ -192,14 +235,16 @@ async def on_role(cb: CallbackQuery):
 @dp.message(F.text == "🔁 Сменить роль")
 @dp.message(F.text.startswith("/role"))
 async def switch_role(m: Message):
+    await safe_delete(m)
     user = await ensure_user(m)
     if not user:
         return
-    await m.answer("Выберите новую роль:", reply_markup=inline_choose_role())
+    await ui_send(m, "Выберите новую роль:", reply_markup=inline_choose_role())
 
 
 @dp.message(F.text == "⬅️ Назад")
 async def back(m: Message):
+    await safe_delete(m)
     user = await ensure_user(m)
     if not user:
         return
@@ -208,64 +253,70 @@ async def back(m: Message):
 
 @dp.message(F.text == "🗺️ Карта (MiniApp)")
 async def map_open(m: Message):
+    await safe_delete(m)
     user = await ensure_user(m)
     if not user:
         return
-    await m.answer("Открывай карту:", reply_markup=inline_open_map())
+    await ui_send(m, "Открывай карту:", reply_markup=inline_open_map())
 
 
 @dp.message(F.text == "🚕 Заказать такси")
 async def order(m: Message):
+    await safe_delete(m)
     user = await ensure_user(m)
     if not user:
         return
     if user.get("role") != "client":
-        await m.answer("Эта кнопка для клиентов. Если вы водитель — нажмите «🔁 Сменить роль».")
+        await ui_send(m, "Эта кнопка для клиентов. Если вы водитель — нажмите «🔁 Сменить роль».")
         return
-    await m.answer("Заказ делается через карту:", reply_markup=inline_open_map())
+    await ui_send(m, "Заказ делается через карту:", reply_markup=inline_open_map())
 
 
 @dp.message(F.text == "📍 Я водитель — поделиться гео")
 async def driver_geo_menu(m: Message):
+    await safe_delete(m)
     user = await ensure_user(m)
     if not user:
         return
     if user.get("role") != "driver":
-        await m.answer("Эта кнопка для водителей. Если вы клиент — нажмите «🔁 Сменить роль».")
+        await ui_send(m, "Эта кнопка для водителей. Если вы клиент — нажмите «🔁 Сменить роль».")
         return
-    await m.answer("Нажмите кнопку и отправьте геопозицию:", reply_markup=kb_driver_geo())
+    await ui_send(m, "Нажмите кнопку и отправьте геопозицию:", reply_markup=kb_driver_geo())
 
 
 @dp.message(F.text == "🧑‍✈️ Стать водителем")
 async def reg_driver(m: Message):
+    await safe_delete(m)
     user = await ensure_user(m)
     if not user:
         return
     if DRIVER_REG_LINK:
-        await m.answer("Регистрация водителя:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        await ui_send(m, "Регистрация водителя:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🧑‍✈️ Стать водителем", url=DRIVER_REG_LINK)]
         ]))
     else:
-        await m.answer("DRIVER_REG_LINK не задан")
+        await ui_send(m, "DRIVER_REG_LINK не задан")
 
 
 @dp.message(F.text == "🛡️ Обход/ВПН")
 async def vpn(m: Message):
+    await safe_delete(m)
     user = await ensure_user(m)
     if not user:
         return
-    await m.answer("Бот обхода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+    await ui_send(m, "Бот обхода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛡️ Открыть", url=VPN_BOT_LINK)]
     ]))
 
 
 @dp.message(F.location)
 async def location(m: Message):
+    await safe_delete(m)
     user = await ensure_user(m)
     if not user:
         return
     if user.get("role") != "driver":
-        await m.answer("Геопозицию принимаю только от водителей.")
+        await ui_send(m, "Геопозицию принимаю только от водителей.")
         return
 
     tg_id = m.from_user.id
@@ -281,33 +332,34 @@ async def location(m: Message):
         "phone": user.get("phone"),
         "name": user.get("full_name") or m.from_user.full_name,
     })
-    await m.answer("✅ Геопозиция водителя обновлена.")
+    await ui_send(m, "✅ Геопозиция водителя обновлена.")
 
 
 @dp.message(F.web_app_data)
 async def webapp(m: Message):
+    await safe_delete(m)
     user = await ensure_user(m)
     if not user:
         return
     if user.get("role") != "client":
-        await m.answer("Заказы создаёт только клиент.")
+        await ui_send(m, "Заказы создаёт только клиент.")
         return
 
     try:
         data = json.loads(m.web_app_data.data)
     except Exception:
-        await m.answer("Не смог прочитать данные с карты. Попробуйте ещё раз.")
+        await ui_send(m, "Не смог прочитать данные с карты. Попробуйте ещё раз.")
         return
 
     phone = (user.get("phone") or "").strip()
     if not phone:
-        await m.answer("Сначала зарегистрируйте телефон через /start")
+        await ui_send(m, "Сначала зарегистрируйте телефон через /start")
         return
 
     from_obj = data.get("from") or {}
     to_list = data.get("to") or []
     if not from_obj or not to_list:
-        await m.answer("Нужно указать Откуда и Куда.")
+        await ui_send(m, "Нужно указать Откуда и Куда.")
         return
 
     extern_id = f"tg-{m.from_user.id}-{uuid.uuid4().hex[:10]}"
@@ -328,10 +380,10 @@ async def webapp(m: Message):
     try:
         res = await backend_post("/api/orders/create", payload)
     except httpx.HTTPStatusError as e:
-        await m.answer(f"Ошибка создания заказа: {e.response.text[:1200]}")
+        await ui_send(m, f"Ошибка создания заказа: {e.response.text[:1200]}")
         return
 
-    await m.answer(f"✅ Заказ создан. ID: {res.get('taxomet_order_id')}\nОжидайте назначения водителя.")
+    await ui_send(m, f"✅ Заказ создан. ID: {res.get('taxomet_order_id')}\nОжидайте назначения водителя.")
 
 
 async def main():
