@@ -136,12 +136,12 @@ async def taxomet_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
 @app.on_event("startup")
 async def startup():
   app.state.pool = await asyncpg.create_pool(
-    await _ensure_users_schema(app.state.pool)
     host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASS,
     min_size=1, max_size=10
   )
   async with app.state.pool.acquire() as conn:
     await conn.execute(SCHEMA)
+    await _ensure_users_schema(app.state.pool)
 
 @app.get("/api/health")
 async def health():
