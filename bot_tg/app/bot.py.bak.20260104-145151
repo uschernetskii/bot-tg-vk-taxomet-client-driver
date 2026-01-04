@@ -2,7 +2,6 @@ import os, json, uuid, asyncio, logging
 import httpx
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
-from aiogram import F
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
@@ -91,25 +90,19 @@ async def ensure_registered(m: types.Message):
     return info["user"]
 
 @dp.message(CommandStart())
-async def cmd_start(m: Message):
-    tg_id = m.from_user.id
-    user = await _api_get_user_tg(tg_id)
-
-    if not user or not user.get("phone"):
-        await m.answer(
-            "Чтобы начать работу, отправьте номер телефона (кнопка ниже).\n"
-            "Роль можно будет менять в любой момент.",
-            reply_markup=_kb_phone()
-        )
+async def start(m: types.Message):
+    user = await ensure_registered(m)
+    if not user:
         return
 
-    if not user.get("current_role"):
-        await m.answer("Выберите, кто вы:", reply_markup=_kb_role())
+    if not user.get("role"):
+        await m.answer("Кто ты? Выбери роль:", reply_markup=inline_choose_role())
         return
 
-    role = user.get("current_role")
-    await m.answer(f"Готово ✅ Текущая роль: {'Водитель' if role=='driver' else 'Клиент'}\n\n"
-                   f"Чтобы переключиться: отправьте '🔁 Сменить роль' или /role")
+    if user["role"] == "driver":
+        await m.answer("Готово ✅ Ты водитель.", reply_markup=kb_main_driver())
+    else:
+        await m.answer("Готово ✅ Ты клиент.", reply_markup=kb_main_client())
 
 @dp.message(F.contact)
 async def contact(m: types.Message):
@@ -283,29 +276,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-@dp.message(F.contact)
-async def on_contact(m: Message):
-    c = m.contact
-    if c.user_id and c.user_id != m.from_user.id:
-        await m.answer("Пожалуйста, отправьте *свой* номер через кнопку ниже.", reply_markup=_kb_phone(), parse_mode="Markdown")
-        return
-    await _api_set_phone_tg(m.from_user.id, c.phone_number)
-    await m.answer("Отлично. Теперь выберите роль:", reply_markup=_kb_role())
-
-@dp.callback_query(F.data.startswith("role:"))
-async def on_role(cb: CallbackQuery):
-    role = cb.data.split(":", 1)[1]
-    await _api_set_role_tg(cb.from_user.id, role)
-    try:
-        await cb.message.edit_text("Готово ✅ Роль сохранена.")
-    except Exception:
-        pass
-    await cb.message.answer(f"Текущая роль: {'Водитель' if role=='driver' else 'Клиент'}\n\n"
-                            f"Чтобы переключиться: отправьте '🔁 Сменить роль' или /role")
-    await cb.answer()
-
-@dp.message(F.text.in_({"🔁 Сменить роль", "/role"}))
-async def switch_role(m: Message):
-    await m.answer("Выберите новую роль:", reply_markup=_kb_role())
