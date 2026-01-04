@@ -57,25 +57,28 @@ def must_internal(request: Request):
 
 
 async def _ensure_users_schema(pool):
-    # отдельными запросами, чтобы не словить "склейку" строк/запятых
-    create_sql = """
-    CREATE TABLE IF NOT EXISTS users (
-      id BIGSERIAL PRIMARY KEY,
-      tg_id BIGINT UNIQUE,
-      vk_id BIGINT UNIQUE,
-      phone VARCHAR(32),
-      full_name TEXT,
-      current_role VARCHAR(16),
-      created_at TIMESTAMPTZ DEFAULT now(),
-      updated_at TIMESTAMPTZ DEFAULT now()
-    );
-    """
-    idx1 = "CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);"
-    idx2 = "CREATE INDEX IF NOT EXISTS idx_users_vk_id ON users(vk_id);"
+    # максимально устойчиво: без сложного CREATE TABLE, только CREATE минимальной таблицы + ALTER
     async with pool.acquire() as conn:
-        await conn.execute(create_sql)
-        await conn.execute(idx1)
-        await conn.execute(idx2)
+        await conn.execute("CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY);")
+
+        # columns
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_id BIGINT;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vk_id BIGINT;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32);")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT;")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS current_role VARCHAR(16);")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();")
+
+        # unique constraints через индексы (ALTER TABLE ... ADD CONSTRAINT IF NOT EXISTS нет)
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_tg_id ON users(tg_id) WHERE tg_id IS NOT NULL;")
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_vk_id ON users(vk_id) WHERE vk_id IS NOT NULL;")
+
+        # обычные индексы (не обязательно, но полезно)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_vk_id ON users(vk_id);")
+
+
 
 
 
