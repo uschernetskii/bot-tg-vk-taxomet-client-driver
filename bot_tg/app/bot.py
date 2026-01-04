@@ -1,23 +1,28 @@
-import os, json, uuid, asyncio, logging
+import os
+import json
+import uuid
+import asyncio
+import logging
+
 import httpx
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram import F
 from aiogram.types import (
+    Message, CallbackQuery,
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
     WebAppInfo
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN","")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL","https://taxi.brakonder.ru")
-BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL","http://backend:8000")
-INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN","")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://taxi.brakonder.ru")
+BACKEND_INTERNAL_URL = os.getenv("BACKEND_INTERNAL_URL", "http://backend:8000")
+INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "")
 
-DRIVER_REG_LINK = os.getenv("DRIVER_REG_LINK","")
-VPN_BOT_LINK = os.getenv("VPN_BOT_LINK","https://t.me/brakoknder_pn_bot")
-NEARBY_RADIUS_METERS = int(os.getenv("NEARBY_RADIUS_METERS","5"))
+DRIVER_REG_LINK = os.getenv("DRIVER_REG_LINK", "")
+VPN_BOT_LINK = os.getenv("VPN_BOT_LINK", "https://t.me/brakoknder_pn_bot")
+NEARBY_RADIUS_METERS = int(os.getenv("NEARBY_RADIUS_METERS", "5"))
 
 if not TG_BOT_TOKEN:
     raise SystemExit("TG_BOT_TOKEN is required")
@@ -25,30 +30,50 @@ if not TG_BOT_TOKEN:
 bot = Bot(TG_BOT_TOKEN)
 dp = Dispatcher()
 
-def kb_phone():
+
+def kb_phone() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]],
-        resize_keyboard=True
+        keyboard=[[KeyboardButton(text="📱 Отправить телефон", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
+
+
+def inline_choose_role() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🙋 Я клиент", callback_data="role:client")],
+        [InlineKeyboardButton(text="🚖 Я водитель", callback_data="role:driver")],
+    ])
+
+
+def inline_open_map() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗺️ Открыть карту", web_app=WebAppInfo(url=f"{PUBLIC_BASE_URL}/miniapp/"))]
+    ])
+
 
 def kb_main_client():
     b = ReplyKeyboardBuilder()
     b.button(text="🚕 Заказать такси")
     b.button(text="🗺️ Карта (MiniApp)")
+    b.button(text="🔁 Сменить роль")
     b.button(text="🛡️ Обход/ВПН")
-    b.adjust(2,1)
+    b.adjust(2, 2)
     return b.as_markup(resize_keyboard=True)
+
 
 def kb_main_driver():
     b = ReplyKeyboardBuilder()
     b.button(text="📍 Я водитель — поделиться гео")
     b.button(text="🗺️ Карта (MiniApp)")
     b.button(text="🧑‍✈️ Стать водителем")
+    b.button(text="🔁 Сменить роль")
     b.button(text="🛡️ Обход/ВПН")
-    b.adjust(2,2)
+    b.adjust(2, 2, 1)
     return b.as_markup(resize_keyboard=True)
 
-def kb_driver_geo():
+
+def kb_driver_geo() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📍 Отправить геопозицию", request_location=True)],
@@ -57,134 +82,163 @@ def kb_driver_geo():
         resize_keyboard=True
     )
 
-def inline_choose_role():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🙋 Я клиент", callback_data="role:client")],
-        [InlineKeyboardButton(text="🚖 Я водитель", callback_data="role:driver")],
-    ])
-
-def inline_open_map():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗺️ Открыть карту", web_app=WebAppInfo(url=f"{PUBLIC_BASE_URL}/miniapp/"))]
-    ])
 
 async def backend_get(path: str):
-    headers={"x-internal-token": INTERNAL_TOKEN}
+    headers = {"x-internal-token": INTERNAL_TOKEN}
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(f"{BACKEND_INTERNAL_URL}{path}", headers=headers)
+        if r.status_code == 404:
+            return None
         r.raise_for_status()
         return r.json()
 
+
 async def backend_post(path: str, payload: dict):
-    headers={"x-internal-token": INTERNAL_TOKEN}
+    headers = {"x-internal-token": INTERNAL_TOKEN}
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(f"{BACKEND_INTERNAL_URL}{path}", json=payload, headers=headers)
         r.raise_for_status()
         return r.json()
 
-async def ensure_registered(m: types.Message):
-    tg_id = m.from_user.id
-    info = await backend_get(f"/api/users/by_tg/{tg_id}")
-    if not info.get("exists"):
-        await m.answer("Чтобы продолжить, отправь номер телефона кнопкой ниже 👇", reply_markup=kb_phone())
+
+def role_label(role: str) -> str:
+    return "Водитель" if role == "driver" else "Клиент"
+
+
+async def get_user_tg(tg_id: int):
+    return await backend_get(f"/api/users/by_tg/{tg_id}")
+
+
+async def ensure_user(m: Message):
+    user = await get_user_tg(m.from_user.id)
+    if not user or not user.get("phone"):
+        await m.answer(
+            "Чтобы начать работу, отправьте номер телефона (кнопка ниже).\n"
+            "Роль можно будет менять в любой момент.",
+            reply_markup=kb_phone(),
+        )
         return None
-    return info["user"]
+    if not user.get("current_role"):
+        await m.answer("Выберите, кто вы:", reply_markup=inline_choose_role())
+        return None
+    return user
+
+
+async def show_menu(m: Message, user: dict):
+    role = user.get("current_role") or "client"
+    if role == "driver":
+        await m.answer(f"Готово ✅ Текущая роль: {role_label(role)}", reply_markup=kb_main_driver())
+    else:
+        await m.answer(f"Готово ✅ Текущая роль: {role_label(role)}", reply_markup=kb_main_client())
+
 
 @dp.message(CommandStart())
 async def cmd_start(m: Message):
     tg_id = m.from_user.id
-    user = await _api_get_user_tg(tg_id)
+    user = await get_user_tg(tg_id)
 
     if not user or not user.get("phone"):
         await m.answer(
             "Чтобы начать работу, отправьте номер телефона (кнопка ниже).\n"
             "Роль можно будет менять в любой момент.",
-            reply_markup=_kb_phone()
+            reply_markup=kb_phone(),
         )
         return
 
     if not user.get("current_role"):
-        await m.answer("Выберите, кто вы:", reply_markup=_kb_role())
+        await m.answer("Выберите, кто вы:", reply_markup=inline_choose_role())
         return
 
-    role = user.get("current_role")
-    await m.answer(f"Готово ✅ Текущая роль: {'Водитель' if role=='driver' else 'Клиент'}\n\n"
-                   f"Чтобы переключиться: отправьте '🔁 Сменить роль' или /role")
+    await show_menu(m, user)
+
 
 @dp.message(F.contact)
-async def contact(m: types.Message):
-    if not m.contact or m.contact.user_id != m.from_user.id:
-        await m.answer("Нужно отправить СВОЙ номер через кнопку «Отправить номер».", reply_markup=kb_phone())
+async def on_contact(m: Message):
+    c = m.contact
+    if not c:
+        return
+    if c.user_id and c.user_id != m.from_user.id:
+        await m.answer("Пожалуйста, отправьте *свой* телефон кнопкой ниже.", reply_markup=kb_phone(), parse_mode="Markdown")
         return
 
-    phone = (m.contact.phone_number or "").strip()
-    if not phone.startswith("+"):
-        if phone.startswith("8"):
-            phone = "+7" + phone[1:]
-        elif phone.startswith("7"):
-            phone = "+" + phone
-        else:
-            phone = "+" + phone
-
-    await backend_post("/api/users/upsert", {
-        "tg_id": int(m.from_user.id),
-        "phone": phone,
-        "full_name": m.from_user.full_name
+    await backend_post("/api/users/set_phone", {
+        "platform": "tg",
+        "external_id": int(m.from_user.id),
+        "phone": c.phone_number,
+        "full_name": m.from_user.full_name,
     })
-    await m.answer("Номер принят ✅ Теперь выбери роль:", reply_markup=inline_choose_role())
+
+    user = await get_user_tg(m.from_user.id)
+    if not user or not user.get("current_role"):
+        await m.answer("Номер принят ✅ Теперь выберите роль:", reply_markup=inline_choose_role())
+        return
+    await show_menu(m, user)
+
 
 @dp.callback_query(F.data.startswith("role:"))
-async def set_role(cb: types.CallbackQuery):
-    role = cb.data.split(":",1)[1]
-    await backend_post("/api/users/set_role", {"tg_id": cb.from_user.id, "role": role})
-
-    if role == "driver":
-        await cb.message.answer("Ты водитель ✅", reply_markup=kb_main_driver())
-    else:
-        await cb.message.answer("Ты клиент ✅", reply_markup=kb_main_client())
-
+async def on_role(cb: CallbackQuery):
+    role = cb.data.split(":", 1)[1]
+    await backend_post("/api/users/set_role", {
+        "platform": "tg",
+        "external_id": int(cb.from_user.id),
+        "role": role,
+    })
+    user = await get_user_tg(cb.from_user.id)
+    if user:
+        await show_menu(cb.message, user)
     await cb.answer()
 
-@dp.message(F.text == "⬅️ Назад")
-async def back(m: types.Message):
-    user = await ensure_registered(m)
+
+@dp.message(F.text == "🔁 Сменить роль")
+@dp.message(F.text.startswith("/role"))
+async def switch_role(m: Message):
+    user = await ensure_user(m)
     if not user:
         return
-    if user.get("role") == "driver":
-        await m.answer("Меню водителя:", reply_markup=kb_main_driver())
-    else:
-        await m.answer("Меню клиента:", reply_markup=kb_main_client())
+    await m.answer("Выберите новую роль:", reply_markup=inline_choose_role())
+
+
+@dp.message(F.text == "⬅️ Назад")
+async def back(m: Message):
+    user = await ensure_user(m)
+    if not user:
+        return
+    await show_menu(m, user)
+
 
 @dp.message(F.text == "🗺️ Карта (MiniApp)")
-async def map_open(m: types.Message):
-    user = await ensure_registered(m)
+async def map_open(m: Message):
+    user = await ensure_user(m)
     if not user:
         return
     await m.answer("Открывай карту:", reply_markup=inline_open_map())
 
+
 @dp.message(F.text == "🚕 Заказать такси")
-async def order(m: types.Message):
-    user = await ensure_registered(m)
+async def order(m: Message):
+    user = await ensure_user(m)
     if not user:
         return
-    if user.get("role") != "client":
-        await m.answer("Эта кнопка для клиентов. Если ты водитель — жми «Назад».")
+    if user.get("current_role") != "client":
+        await m.answer("Эта кнопка для клиентов. Если вы водитель — нажмите «🔁 Сменить роль».")
         return
     await m.answer("Заказ делается через карту:", reply_markup=inline_open_map())
 
+
 @dp.message(F.text == "📍 Я водитель — поделиться гео")
-async def driver(m: types.Message):
-    user = await ensure_registered(m)
+async def driver_geo_menu(m: Message):
+    user = await ensure_user(m)
     if not user:
         return
-    if user.get("role") != "driver":
-        await m.answer("Эта кнопка для водителей. Если ты клиент — жми «Назад».")
+    if user.get("current_role") != "driver":
+        await m.answer("Эта кнопка для водителей. Если вы клиент — нажмите «🔁 Сменить роль».")
         return
-    await m.answer("Нажми кнопку и отправь геопозицию:", reply_markup=kb_driver_geo())
+    await m.answer("Нажмите кнопку и отправьте геопозицию:", reply_markup=kb_driver_geo())
+
 
 @dp.message(F.text == "🧑‍✈️ Стать водителем")
-async def reg(m: types.Message):
-    user = await ensure_registered(m)
+async def reg_driver(m: Message):
+    user = await ensure_user(m)
     if not user:
         return
     if DRIVER_REG_LINK:
@@ -194,22 +248,24 @@ async def reg(m: types.Message):
     else:
         await m.answer("DRIVER_REG_LINK не задан")
 
+
 @dp.message(F.text == "🛡️ Обход/ВПН")
-async def vpn(m: types.Message):
-    user = await ensure_registered(m)
+async def vpn(m: Message):
+    user = await ensure_user(m)
     if not user:
         return
     await m.answer("Бот обхода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛡️ Открыть", url=VPN_BOT_LINK)]
     ]))
 
+
 @dp.message(F.location)
-async def location(m: types.Message):
-    user = await ensure_registered(m)
+async def location(m: Message):
+    user = await ensure_user(m)
     if not user:
         return
-    if user.get("role") != "driver":
-        await m.answer("Гео принимаю только от водителей.")
+    if user.get("current_role") != "driver":
+        await m.answer("Геопозицию принимаю только от водителей.")
         return
 
     tg_id = m.from_user.id
@@ -223,28 +279,29 @@ async def location(m: types.Message):
         "lat": float(lat),
         "lon": float(lon),
         "phone": user.get("phone"),
-        "name": user.get("full_name") or m.from_user.full_name
+        "name": user.get("full_name") or m.from_user.full_name,
     })
     await m.answer("✅ Геопозиция водителя обновлена.")
 
+
 @dp.message(F.web_app_data)
-async def webapp(m: types.Message):
-    user = await ensure_registered(m)
+async def webapp(m: Message):
+    user = await ensure_user(m)
     if not user:
         return
-    if user.get("role") != "client":
+    if user.get("current_role") != "client":
         await m.answer("Заказы создаёт только клиент.")
         return
 
     try:
         data = json.loads(m.web_app_data.data)
     except Exception:
-        await m.answer("Не смог прочитать данные с карты. Попробуй ещё раз.")
+        await m.answer("Не смог прочитать данные с карты. Попробуйте ещё раз.")
         return
 
     phone = (user.get("phone") or "").strip()
     if not phone:
-        await m.answer("Сначала зарегистрируй номер через /start")
+        await m.answer("Сначала зарегистрируйте телефон через /start")
         return
 
     from_obj = data.get("from") or {}
@@ -265,7 +322,7 @@ async def webapp(m: types.Message):
         "to_lats": [x.get("lat") for x in to_list],
         "to_lons": [x.get("lon") for x in to_list],
         "tg_user_id": int(m.from_user.id),
-        "extern_id": extern_id
+        "extern_id": extern_id,
     }
 
     try:
@@ -274,38 +331,14 @@ async def webapp(m: types.Message):
         await m.answer(f"Ошибка создания заказа: {e.response.text[:1200]}")
         return
 
-    await m.answer(f"✅ Заказ создан. ID: {res.get('taxomet_order_id')}\nОжидай назначения водителя.")
+    await m.answer(f"✅ Заказ создан. ID: {res.get('taxomet_order_id')}\nОжидайте назначения водителя.")
+
 
 async def main():
     logging.basicConfig(level=logging.INFO)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
+
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-@dp.message(F.contact)
-async def on_contact(m: Message):
-    c = m.contact
-    if c.user_id and c.user_id != m.from_user.id:
-        await m.answer("Пожалуйста, отправьте *свой* номер через кнопку ниже.", reply_markup=_kb_phone(), parse_mode="Markdown")
-        return
-    await _api_set_phone_tg(m.from_user.id, c.phone_number)
-    await m.answer("Отлично. Теперь выберите роль:", reply_markup=_kb_role())
-
-@dp.callback_query(F.data.startswith("role:"))
-async def on_role(cb: CallbackQuery):
-    role = cb.data.split(":", 1)[1]
-    await _api_set_role_tg(cb.from_user.id, role)
-    try:
-        await cb.message.edit_text("Готово ✅ Роль сохранена.")
-    except Exception:
-        pass
-    await cb.message.answer(f"Текущая роль: {'Водитель' if role=='driver' else 'Клиент'}\n\n"
-                            f"Чтобы переключиться: отправьте '🔁 Сменить роль' или /role")
-    await cb.answer()
-
-@dp.message(F.text.in_({"🔁 Сменить роль", "/role"}))
-async def switch_role(m: Message):
-    await m.answer("Выберите новую роль:", reply_markup=_kb_role())

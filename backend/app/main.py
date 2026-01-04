@@ -1,12 +1,13 @@
-import os, json, time, uuid
+import os, json, uuid
 from typing import Any, Optional
-from .users import router as users_router
 
 import asyncpg
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+
+from .users import router as users_router
 
 ENV = os.getenv("ENV", "prod")
 
@@ -45,22 +46,62 @@ VK_CONFIRMATION = os.getenv("VK_CONFIRMATION","")
 VK_SECRET = os.getenv("VK_SECRET","")
 
 app = FastAPI(title="Taxi Backend", version="1.0.0")
+app.include_router(users_router)
+
+
+def must_internal(request: Request):
+  token = request.headers.get("x-internal-token","")
+  # Если INTERNAL_TOKEN не задан — не пускаем (это прод-сервис)
+  if not INTERNAL_TOKEN or token != INTERNAL_TOKEN:
+    raise HTTPException(status_code=401, detail="internal token invalid")
 
 
 async def _ensure_users_schema(pool):
-    async with pool.acquire() as conn:
-        await conn.execute("""CREATE TABLE IF NOT EXISTS users (
-  id BIGSERIAL PRIMARY KEY,
-  tg_id BIGINT UNIQUE,
-  vk_id BIGINT UNIQUE,
-  phone VARCHAR(32),
-  current_role VARCHAR(16) CHECK (current_role IN ('client','driver')),
-  created_at TIMESTAMPTZ DEFAULT now(),
-  updated_at TIMESTAMPTZ DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);
-CREATE INDEX IF NOT EXISTS idx_users_vk_id ON users(vk_id);""")
-app.include_router(users_router)
+  # ВАЖНО: без CHECK, и отдельными командами (так надёжнее)
+  stmts = [
+    """
+    CREATE TABLE IF NOT EXISTS users (
+      id BIGSERIAL PRIMARY KEY,
+      tg_id BIGINT UNIQUE,
+      vk_id BIGINT UNIQUE,
+      phone VARCHAR(32),
+      full_name TEXT,
+      current_role VARCHAR(16),
+      created_at TIMESTAMPTZ DEFAULT now(),
+      updated_at TIMESTAMPTZ DEFAULT now()
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);",
+    "CREATE INDEX IF NOT EXISTS idx_users_vk_id ON users(vk_id);",
+  ]
+  async with pool.acquire() as conn:
+    for q in stmts:
+      await conn.execute(q)
+
+
+async def tg_send(chat_id: int, text: str):
+  if not TG_BOT_TOKEN or not chat_id:
+    return
+  url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+  payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+  try:
+    async with httpx.AsyncClient(timeout=15) as client:
+      await client.post(url, json=payload)
+  except Exception:
+    return
+
+
+async def taxomet_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
+  if not TAXOMET_BASE_URL:
+    raise HTTPException(status_code=500, detail="TAXOMET_BASE_URL not set")
+  async with httpx.AsyncClient(timeout=30) as client:
+    r = await client.get(f"{TAXOMET_BASE_URL}{path}", params=params)
+    r.raise_for_status()
+    try:
+      return r.json()
+    except Exception:
+      return {"raw": r.text}
+
 
 SCHEMA = """
 CREATE EXTENSION IF NOT EXISTS postgis;
@@ -106,32 +147,6 @@ CREATE TABLE IF NOT EXISTS orders(
 CREATE INDEX IF NOT EXISTS idx_orders_taxomet ON orders(taxomet_order_id);
 """
 
-def must_internal(request: Request):
-  token = request.headers.get("x-internal-token","")
-  if not INTERNAL_TOKEN or token != INTERNAL_TOKEN:
-    raise HTTPException(status_code=401, detail="internal token invalid")
-
-async def tg_send(chat_id: int, text: str):
-  if not TG_BOT_TOKEN or not chat_id:
-    return
-  url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-  payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
-  try:
-    async with httpx.AsyncClient(timeout=15) as client:
-      await client.post(url, json=payload)
-  except Exception:
-    return
-
-async def taxomet_get(path: str, params: dict[str, Any]) -> dict[str, Any]:
-  if not TAXOMET_BASE_URL:
-    raise HTTPException(status_code=500, detail="TAXOMET_BASE_URL not set")
-  async with httpx.AsyncClient(timeout=30) as client:
-    r = await client.get(f"{TAXOMET_BASE_URL}{path}", params=params)
-    r.raise_for_status()
-    try:
-      return r.json()
-    except Exception:
-      return {"raw": r.text}
 
 @app.on_event("startup")
 async def startup():
@@ -141,11 +156,13 @@ async def startup():
   )
   async with app.state.pool.acquire() as conn:
     await conn.execute(SCHEMA)
-    await _ensure_users_schema(app.state.pool)
+  await _ensure_users_schema(app.state.pool)
+
 
 @app.get("/api/health")
 async def health():
   return {"ok": True, "env": ENV}
+
 
 ########################
 # GEO proxy
@@ -157,12 +174,14 @@ async def geo_search(q: str, limit: int = 5):
     r.raise_for_status()
     return JSONResponse(content=r.json())
 
+
 @app.get("/api/geo/reverse")
 async def geo_reverse(lat: float, lon: float):
   async with httpx.AsyncClient(timeout=20) as client:
     r = await client.get(f"{GEO_BASE_URL}/reverse", params={"lat": lat, "lon": lon, "format": "json", "addressdetails": 1})
     r.raise_for_status()
     return JSONResponse(content=r.json())
+
 
 ########################
 # Drivers
@@ -174,6 +193,7 @@ class DriverLocationIn(BaseModel):
   lon: float
   phone: Optional[str] = None
   name: Optional[str] = None
+
 
 @app.post("/api/drivers/location")
 async def driver_location(payload: DriverLocationIn, request: Request):
@@ -191,6 +211,7 @@ async def driver_location(payload: DriverLocationIn, request: Request):
       payload.driver_id, payload.lon, payload.lat
     )
   return {"ok": True}
+
 
 @app.get("/api/drivers/nearby")
 async def drivers_nearby(lat: float, lon: float, radius_m: int = NEARBY_RADIUS_METERS):
@@ -213,21 +234,25 @@ async def drivers_nearby(lat: float, lon: float, radius_m: int = NEARBY_RADIUS_M
     )
   return {"ok": True, "radius_m": radius_m, "drivers": [dict(r) for r in rows]}
 
+
 ########################
 # Orders -> Taxomet
 ########################
 class OrderCreateIn(BaseModel):
   phone: str
-  client_name: Optional[str] = None
-  comment: Optional[str] = None
+  client_name: Optional[str] = ""
+  comment: Optional[str] = ""
+  extern_id: str
+  tg_user_id: int
+
   from_address: str
   from_lat: Optional[float] = None
   from_lon: Optional[float] = None
-  to_addresses: list[str] = Field(default_factory=list)
-  to_lats: list[Optional[float]] = Field(default_factory=list)
-  to_lons: list[Optional[float]] = Field(default_factory=list)
-  tg_user_id: int
-  extern_id: str
+
+  to_addresses: list[str]
+  to_lats: Optional[list[Optional[float]]] = None
+  to_lons: Optional[list[Optional[float]]] = None
+
 
 @app.post("/api/orders/create")
 async def orders_create(payload: OrderCreateIn, request: Request):
@@ -235,7 +260,6 @@ async def orders_create(payload: OrderCreateIn, request: Request):
   if len(payload.to_addresses) < 1:
     raise HTTPException(status_code=400, detail="to_addresses must contain at least 1 (destination)")
 
-  # to[] : first is from_address, then destinations/points
   to_list = [payload.from_address] + payload.to_addresses
 
   params: dict[str, Any] = {
@@ -250,7 +274,6 @@ async def orders_create(payload: OrderCreateIn, request: Request):
     "to[]": to_list,
   }
 
-  # lat[]/lon[] aligned with to[]
   lat_arr = []
   lon_arr = []
   if payload.from_lat is not None and payload.from_lon is not None:
@@ -283,7 +306,6 @@ async def orders_create(payload: OrderCreateIn, request: Request):
       payload.client_name, payload.from_address, json.dumps(payload.to_addresses)
     )
 
-  # notify groups
   msg = (
     f"🚕 Новый заказ\n"
     f"ID: {taxomet_order_id}\n"
@@ -298,6 +320,7 @@ async def orders_create(payload: OrderCreateIn, request: Request):
 
   return {"ok": True, "taxomet_order_id": taxomet_order_id, "extern_id": payload.extern_id}
 
+
 ########################
 # Taxomet webhook (statuses)
 ########################
@@ -308,6 +331,7 @@ class TaxometWebhookIn(BaseModel):
   driver_id: Optional[int] = None
   driver_title: Optional[str] = None
   fix_price: Optional[float] = 0
+
 
 @app.post("/api/taxomet/webhook")
 async def taxomet_webhook(payload: TaxometWebhookIn, request: Request):
@@ -330,9 +354,8 @@ async def taxomet_webhook(payload: TaxometWebhookIn, request: Request):
       """,
       payload.status, payload.driver_id, payload.driver_title, payload.fix_price, payload.extern_id
     )
-    row = await conn.fetchrow("SELECT tg_user_id, taxomet_order_id, phone, from_address FROM orders WHERE extern_id=$1", payload.extern_id)
+    row = await conn.fetchrow("SELECT tg_user_id, taxomet_order_id FROM orders WHERE extern_id=$1", payload.extern_id)
 
-  # уведомления клиенту и в группы
   if row:
     user_id = int(row["tg_user_id"])
     order_id = int(row["taxomet_order_id"] or payload.order_id)
@@ -344,6 +367,7 @@ async def taxomet_webhook(payload: TaxometWebhookIn, request: Request):
 
   return {"ok": True}
 
+
 ########################
 # VK callback (задел)
 ########################
@@ -352,17 +376,12 @@ async def vk_callback(request: Request):
   body = await request.json()
   t = body.get("type","")
   if t == "confirmation":
-    # VK требует вернуть confirmation code
     if not VK_CONFIRMATION:
       raise HTTPException(status_code=500, detail="VK_CONFIRMATION not set")
     return JSONResponse(content=VK_CONFIRMATION)
 
-  # simple secret check for callbacks
   if VK_SECRET:
     if body.get("secret","") != VK_SECRET:
       raise HTTPException(status_code=401, detail="bad vk secret")
 
-  # Пока просто acknowledge. В дальнейшем тут будет маршрутизация в общую логику заказов.
   return JSONResponse(content="ok")
-
-# TODO: add users table init in startup
