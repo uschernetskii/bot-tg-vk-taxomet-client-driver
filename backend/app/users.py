@@ -1,172 +1,156 @@
-import os
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+import os, re
+import asyncpg
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/api/users", tags=["users"])
+router = APIRouter()
 
-INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN", "")
+INTERNAL_TOKEN = os.getenv("INTERNAL_TOKEN","")
+DB_DSN = os.getenv("DB_DSN","")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST","postgres")
+POSTGRES_PORT = int(os.getenv("POSTGRES_PORT","5432"))
+POSTGRES_DB = os.getenv("POSTGRES_DB","taxi")
+POSTGRES_USER = os.getenv("POSTGRES_USER","taxi")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD","")
 
+def _dsn():
+    if DB_DSN:
+        return DB_DSN
+    return f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
 
-def require_internal(x_internal_token: str = Header(default="")):
-    if not INTERNAL_TOKEN or x_internal_token != INTERNAL_TOKEN:
-        raise HTTPException(status_code=401, detail="unauthorized")
+_pool: asyncpg.Pool | None = None
 
+async def pool() -> asyncpg.Pool:
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(dsn=_dsn(), min_size=1, max_size=10)
+    return _pool
 
-async def _get_pool(request: Request):
-    pool = getattr(request.app.state, "pool", None)
-    if not pool:
-        raise HTTPException(status_code=500, detail="DB pool not initialized")
-    return pool
+def _require_internal(token: str | None):
+    if not INTERNAL_TOKEN:
+        raise HTTPException(status_code=500, detail="INTERNAL_TOKEN is not set on backend")
+    if token != INTERNAL_TOKEN:
+        raise HTTPException(status_code=401, detail="Bad internal token")
 
+def normalize_phone(phone: str) -> str:
+    # Store as digits only (Taxomet friendly): 7XXXXXXXXXX
+    digits = re.sub(r"\D+", "", phone or "")
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if len(digits) == 10 and digits.startswith("9"):
+        digits = "7" + digits
+    if len(digits) != 11 or not digits.startswith("7"):
+        raise ValueError("phone must be 11 digits starting with 7")
+    return digits
 
-def _digits(raw: str) -> str:
-    return "".join(ch for ch in (raw or "") if ch.isdigit())
+class UserOut(BaseModel):
+    id: int
+    tg_id: int | None = None
+    vk_id: int | None = None
+    phone: str | None = None
+    role: str = "client"  # client|driver
+    full_name: str | None = None
+    username: str | None = None
 
-
-def normalize_ru_phone(raw: str) -> str:
-    d = _digits(raw)
-    if len(d) == 11 and d.startswith("8"):
-        d = "7" + d[1:]
-    if len(d) == 11 and d.startswith("7"):
-        return d
-    raise ValueError("Неверный телефон. Нужен РФ номер: 7XXXXXXXXXX (11 цифр).")
-
-
-class SetPhoneIn(BaseModel):
-    platform: str  # tg|vk
-    external_id: int
+class PhoneIn(BaseModel):
+    tg_id: int | None = None
+    vk_id: int | None = None
     phone: str
     full_name: str | None = None
+    username: str | None = None
 
+class RoleIn(BaseModel):
+    tg_id: int | None = None
+    vk_id: int | None = None
+    role: str
 
-class SetRoleIn(BaseModel):
-    platform: str  # tg|vk
-    external_id: int
-    role: str  # client|driver
+class UiLastIn(BaseModel):
+    tg_id: int | None = None
+    vk_id: int | None = None
+    ui_chat_id: int
+    ui_message_id: int
 
-class SetUiMessageIn(BaseModel):
-    platform: str  # tg|vk
-    external_id: int
-    chat_id: int
-    message_id: int
+async def _get_or_create_user_by(pool: asyncpg.Pool, tg_id: int | None, vk_id: int | None, full_name: str | None, username: str | None):
+    if not tg_id and not vk_id:
+        raise HTTPException(status_code=400, detail="tg_id or vk_id required")
 
-
-@router.get("/by_tg/{tg_id}", dependencies=[Depends(require_internal)])
-async def by_tg(tg_id: int, request: Request):
-    pool = await _get_pool(request)
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE tg_id=$1",
-            tg_id,
+    if tg_id:
+        row = await pool.fetchrow("SELECT * FROM users WHERE tg_id=$1", tg_id)
+        if row:
+            return row
+        row = await pool.fetchrow(
+            "INSERT INTO users(tg_id, role, full_name, username) VALUES ($1,'client',$2,$3) RETURNING *",
+            tg_id, full_name, username
         )
-        if not row:
-            raise HTTPException(status_code=404, detail="User not found")
-        return dict(row)
+        return row
 
+    row = await pool.fetchrow("SELECT * FROM users WHERE vk_id=$1", vk_id)
+    if row:
+        return row
+    row = await pool.fetchrow(
+        "INSERT INTO users(vk_id, role, full_name, username) VALUES ($1,'client',$2,$3) RETURNING *",
+        vk_id, full_name, username
+    )
+    return row
 
-@router.get("/by_external/{platform}/{external_id}", dependencies=[Depends(require_internal)])
-async def by_external(platform: str, external_id: int, request: Request):
-    if platform not in ("tg", "vk"):
-        raise HTTPException(status_code=400, detail="Bad platform")
-    field = "tg_id" if platform == "tg" else "vk_id"
-    pool = await _get_pool(request)
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE {field}=$1",
-            external_id,
-        )
-        if not row:
-            raise HTTPException(status_code=404, detail="User not found")
-        return dict(row)
+def _row_to_out(row) -> UserOut:
+    return UserOut(
+        id=row["id"],
+        tg_id=row.get("tg_id"),
+        vk_id=row.get("vk_id"),
+        phone=row.get("phone"),
+        role=row.get("role") or "client",
+        full_name=row.get("full_name"),
+        username=row.get("username"),
+    )
 
+@router.get("/api/users/by_tg/{tg_id}", response_model=UserOut)
+async def by_tg(tg_id: int):
+    p = await pool()
+    row = await _get_or_create_user_by(p, tg_id=tg_id, vk_id=None, full_name=None, username=None)
+    return _row_to_out(row)
 
-@router.post("/set_ui_message", dependencies=[Depends(require_internal)])
-async def set_ui_message(payload: SetUiMessageIn, request: Request):
-    if payload.platform not in ("tg", "vk"):
-        raise HTTPException(status_code=400, detail="platform must be tg|vk")
-    field = "tg_id" if payload.platform == "tg" else "vk_id"
-    pool = await _get_pool(request)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"""
-            INSERT INTO users ({field}, ui_chat_id, ui_message_id, updated_at)
-            VALUES ($1, $2, $3, now())
-            ON CONFLICT ({field})
-            DO UPDATE SET
-                ui_chat_id=EXCLUDED.ui_chat_id,
-                ui_message_id=EXCLUDED.ui_message_id,
-                updated_at=now()
-            """,
-            payload.external_id,
-            int(payload.chat_id),
-            int(payload.message_id),
-        )
-        row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE {field}=$1",
-            payload.external_id,
-        )
-        return dict(row)
+@router.get("/api/users/by_vk/{vk_id}", response_model=UserOut)
+async def by_vk(vk_id: int):
+    p = await pool()
+    row = await _get_or_create_user_by(p, tg_id=None, vk_id=vk_id, full_name=None, username=None)
+    return _row_to_out(row)
 
-@router.post("/set_phone", dependencies=[Depends(require_internal)])
-async def set_phone(payload: SetPhoneIn, request: Request):
-    if payload.platform not in ("tg", "vk"):
-        raise HTTPException(status_code=400, detail="platform must be tg|vk")
+@router.post("/api/users/upsert_phone", response_model=UserOut)
+async def upsert_phone(payload: PhoneIn, x_internal_token: str | None = None):
+    _require_internal(x_internal_token)
+    p = await pool()
     try:
-        phone11 = normalize_ru_phone(payload.phone)
+        phone = normalize_phone(payload.phone)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    field = "tg_id" if payload.platform == "tg" else "vk_id"
-    pool = await _get_pool(request)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"""
-            INSERT INTO users ({field}, phone, full_name, updated_at)
-            VALUES ($1, $2, $3, now())
-            ON CONFLICT ({field})
-            DO UPDATE SET
-                phone=EXCLUDED.phone,
-                full_name=COALESCE(EXCLUDED.full_name, users.full_name),
-                updated_at=now()
-            """,
-            payload.external_id,
-            phone11,
-            payload.full_name,
-        )
-        row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE {field}=$1",
-            payload.external_id,
-        )
-        return dict(row)
+    row = await _get_or_create_user_by(p, payload.tg_id, payload.vk_id, payload.full_name, payload.username)
 
+    row = await p.fetchrow(
+        "UPDATE users SET phone=$1, full_name=COALESCE($2, full_name), username=COALESCE($3, username) WHERE id=$4 RETURNING *",
+        phone, payload.full_name, payload.username, row["id"]
+    )
+    return _row_to_out(row)
 
-@router.post("/set_role", dependencies=[Depends(require_internal)])
-async def set_role(payload: SetRoleIn, request: Request):
-    if payload.platform not in ("tg", "vk"):
-        raise HTTPException(status_code=400, detail="platform must be tg|vk")
+@router.post("/api/users/set_role", response_model=UserOut)
+async def set_role(payload: RoleIn, x_internal_token: str | None = None):
+    _require_internal(x_internal_token)
     role = (payload.role or "").strip().lower()
-    if role not in ("client", "driver"):
+    if role not in ("client","driver"):
         raise HTTPException(status_code=400, detail="role must be client|driver")
+    p = await pool()
+    row = await _get_or_create_user_by(p, payload.tg_id, payload.vk_id, None, None)
+    row = await p.fetchrow("UPDATE users SET role=$1 WHERE id=$2 RETURNING *", role, row["id"])
+    return _row_to_out(row)
 
-    field = "tg_id" if payload.platform == "tg" else "vk_id"
-    pool = await _get_pool(request)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"""
-            INSERT INTO users ({field}, updated_at)
-            VALUES ($1, now())
-            ON CONFLICT ({field})
-            DO UPDATE SET updated_at=now()
-            """,
-            payload.external_id,
-        )
-        await conn.execute(
-            f"UPDATE users SET role=$1, updated_at=now() WHERE {field}=$2",
-            role,
-            payload.external_id,
-        )
-        row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, role, ui_chat_id, ui_message_id FROM users WHERE {field}=$1",
-            payload.external_id,
-        )
-        return dict(row)
+@router.post("/api/users/ui_last")
+async def ui_last(payload: UiLastIn, x_internal_token: str | None = None):
+    _require_internal(x_internal_token)
+    p = await pool()
+    row = await _get_or_create_user_by(p, payload.tg_id, payload.vk_id, None, None)
+    await p.execute(
+        "UPDATE users SET ui_chat_id=$1, ui_message_id=$2 WHERE id=$3",
+        int(payload.ui_chat_id), int(payload.ui_message_id), row["id"]
+    )
+    return {"ok": True}
