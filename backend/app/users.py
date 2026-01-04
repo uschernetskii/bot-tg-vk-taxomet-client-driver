@@ -50,7 +50,7 @@ async def by_tg(tg_id: int, request: Request):
     pool = await _get_pool(request)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT tg_id, vk_id, phone, full_name, current_role FROM users WHERE tg_id=$1",
+            "SELECT tg_id, vk_id, phone, full_name, role FROM users WHERE tg_id=$1",
             tg_id,
         )
         if not row:
@@ -66,7 +66,7 @@ async def by_external(platform: str, external_id: int, request: Request):
     pool = await _get_pool(request)
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, current_role FROM users WHERE {field}=$1",
+            f"SELECT tg_id, vk_id, phone, full_name, role FROM users WHERE {field}=$1",
             external_id,
         )
         if not row:
@@ -101,7 +101,7 @@ async def set_phone(payload: SetPhoneIn, request: Request):
             payload.full_name,
         )
         row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, current_role FROM users WHERE {field}=$1",
+            f"SELECT tg_id, vk_id, phone, full_name, role FROM users WHERE {field}=$1",
             payload.external_id,
         )
         return dict(row)
@@ -128,12 +128,12 @@ async def set_role(payload: SetRoleIn, request: Request):
             payload.external_id,
         )
         await conn.execute(
-            f"UPDATE users SET current_role=$1, updated_at=now() WHERE {field}=$2",
+            f"UPDATE users SET role=$1, updated_at=now() WHERE {field}=$2",
             role,
             payload.external_id,
         )
         row = await conn.fetchrow(
-            f"SELECT tg_id, vk_id, phone, full_name, current_role FROM users WHERE {field}=$1",
+            f"SELECT tg_id, vk_id, phone, full_name, role FROM users WHERE {field}=$1",
             payload.external_id,
         )
         return dict(row)

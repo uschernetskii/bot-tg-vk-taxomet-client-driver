@@ -118,14 +118,14 @@ async def ensure_user(m: Message):
             reply_markup=kb_phone(),
         )
         return None
-    if not user.get("current_role"):
+    if not user.get("role"):
         await m.answer("Выберите, кто вы:", reply_markup=inline_choose_role())
         return None
     return user
 
 
 async def show_menu(m: Message, user: dict):
-    role = user.get("current_role") or "client"
+    role = user.get("role") or "client"
     if role == "driver":
         await m.answer(f"Готово ✅ Текущая роль: {role_label(role)}", reply_markup=kb_main_driver())
     else:
@@ -145,7 +145,7 @@ async def cmd_start(m: Message):
         )
         return
 
-    if not user.get("current_role"):
+    if not user.get("role"):
         await m.answer("Выберите, кто вы:", reply_markup=inline_choose_role())
         return
 
@@ -169,7 +169,7 @@ async def on_contact(m: Message):
     })
 
     user = await get_user_tg(m.from_user.id)
-    if not user or not user.get("current_role"):
+    if not user or not user.get("role"):
         await m.answer("Номер принят ✅ Теперь выберите роль:", reply_markup=inline_choose_role())
         return
     await show_menu(m, user)
@@ -219,7 +219,7 @@ async def order(m: Message):
     user = await ensure_user(m)
     if not user:
         return
-    if user.get("current_role") != "client":
+    if user.get("role") != "client":
         await m.answer("Эта кнопка для клиентов. Если вы водитель — нажмите «🔁 Сменить роль».")
         return
     await m.answer("Заказ делается через карту:", reply_markup=inline_open_map())
@@ -230,7 +230,7 @@ async def driver_geo_menu(m: Message):
     user = await ensure_user(m)
     if not user:
         return
-    if user.get("current_role") != "driver":
+    if user.get("role") != "driver":
         await m.answer("Эта кнопка для водителей. Если вы клиент — нажмите «🔁 Сменить роль».")
         return
     await m.answer("Нажмите кнопку и отправьте геопозицию:", reply_markup=kb_driver_geo())
@@ -264,7 +264,7 @@ async def location(m: Message):
     user = await ensure_user(m)
     if not user:
         return
-    if user.get("current_role") != "driver":
+    if user.get("role") != "driver":
         await m.answer("Геопозицию принимаю только от водителей.")
         return
 
@@ -289,7 +289,7 @@ async def webapp(m: Message):
     user = await ensure_user(m)
     if not user:
         return
-    if user.get("current_role") != "client":
+    if user.get("role") != "client":
         await m.answer("Заказы создаёт только клиент.")
         return
 

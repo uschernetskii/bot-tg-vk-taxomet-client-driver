@@ -66,7 +66,7 @@ async def _ensure_users_schema(pool):
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vk_id BIGINT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32);")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT;")
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS current_role VARCHAR(16);")
+        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(16);")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();")
 
