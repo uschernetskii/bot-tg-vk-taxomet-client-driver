@@ -57,11 +57,11 @@ def must_internal(request: Request):
 
 
 async def _ensure_users_schema(pool):
-    # максимально устойчиво: без сложного CREATE TABLE, только CREATE минимальной таблицы + ALTER
+    # устойчиво: минимальный CREATE + ALTER + индексы
     async with pool.acquire() as conn:
         await conn.execute("CREATE TABLE IF NOT EXISTS users (id BIGSERIAL PRIMARY KEY);")
 
-        # columns
+        # columns (NULL допустимы)
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_id BIGINT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS vk_id BIGINT;")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(32);")
@@ -70,18 +70,18 @@ async def _ensure_users_schema(pool):
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();")
         await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();")
 
-        # unique constraints через индексы (ALTER TABLE ... ADD CONSTRAINT IF NOT EXISTS нет)
-        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_tg_id ON users(tg_id) WHERE tg_id IS NOT NULL;")
-        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_vk_id ON users(vk_id) WHERE vk_id IS NOT NULL;")
+        # ВАЖНО:
+        # раньше могли быть partial unique indexes с WHERE ... — они НЕ подходят для ON CONFLICT (tg_id)/(vk_id).
+        # Поэтому: DROP + CREATE нормальных UNIQUE по tg_id/vk_id (NULL'ов может быть много — это норм).
+        await conn.execute("DROP INDEX IF EXISTS uq_users_tg_id;")
+        await conn.execute("DROP INDEX IF EXISTS uq_users_vk_id;")
 
-        # обычные индексы (не обязательно, но полезно)
+        await conn.execute("CREATE UNIQUE INDEX uq_users_tg_id ON users(tg_id);")
+        await conn.execute("CREATE UNIQUE INDEX uq_users_vk_id ON users(vk_id);")
+
+        # обычные индексы (опционально)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_users_vk_id ON users(vk_id);")
-
-
-
-
-
 
 async def tg_send(chat_id: int, text: str):
   if not TG_BOT_TOKEN or not chat_id:
