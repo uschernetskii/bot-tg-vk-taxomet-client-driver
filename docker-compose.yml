@@ -1,0 +1,100 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - taxi_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    environment:
+      ENV: ${ENV}
+
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN}
+
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      GEO_BASE_URL: ${GEO_BASE_URL}
+      GEO_TILES_STYLE_URL: ${GEO_TILES_STYLE_URL}
+
+      DRIVER_ONLINE_TTL_SECONDS: ${DRIVER_ONLINE_TTL_SECONDS}
+      NEARBY_RADIUS_METERS: ${NEARBY_RADIUS_METERS}
+
+      TG_ADMIN_GROUP_ID: ${TG_ADMIN_GROUP_ID}
+      TG_NOTIFY_GROUP_ID: ${TG_NOTIFY_GROUP_ID}
+
+      TAXOMET_BASE_URL: ${TAXOMET_BASE_URL}
+      TAXOMET_OPERATOR_LOGIN: ${TAXOMET_OPERATOR_LOGIN}
+      TAXOMET_OPERATOR_PASSWORD: ${TAXOMET_OPERATOR_PASSWORD}
+      TAXOMET_UNIT_ID: ${TAXOMET_UNIT_ID}
+      TAXOMET_TARIF_ID: ${TAXOMET_TARIF_ID}
+      TAXOMET_WEBHOOK_SECRET: ${TAXOMET_WEBHOOK_SECRET}
+
+      VK_CONFIRMATION: ${VK_CONFIRMATION}
+      VK_SECRET: ${VK_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  bot_tg:
+    build: ./bot_tg
+    environment:
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      BACKEND_INTERNAL_URL: http://backend:8000
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+
+      TG_ADMIN_GROUP_ID: ${TG_ADMIN_GROUP_ID}
+      TG_NOTIFY_GROUP_ID: ${TG_NOTIFY_GROUP_ID}
+
+      DRIVER_REG_LINK: ${DRIVER_REG_LINK}
+      VPN_BOT_LINK: ${VPN_BOT_LINK}
+      PYTHONUNBUFFERED: "1"
+      NEARBY_RADIUS_METERS: ${NEARBY_RADIUS_METERS}
+    depends_on:
+      - backend
+    restart: unless-stopped
+    command: ["python", "-u", "-m", "app.bot"]
+  # VK service stub (задел). Включается: docker compose --profile vk up -d
+  bot_vk:
+    build: ./bot_vk
+    profiles: ["vk"]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./miniapp:/srv/miniapp:ro
+      - taxi_caddy_data:/data
+      - taxi_caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  taxi_pg:
+  taxi_caddy_data:
+  taxi_caddy_config:

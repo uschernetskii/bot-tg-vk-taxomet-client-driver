@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Быстро и точка — карта</title>
+
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+
+  <script src="./config.js"></script>
+
+  <style>
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    #top{padding:10px;border-bottom:1px solid #eee;display:flex;gap:8px;flex-wrap:wrap}
+    #map{height:calc(100% - 110px)}
+    input,button{padding:10px;border:1px solid #ccc;border-radius:10px;font-size:14px}
+    button{background:#111;color:#fff;border-color:#111}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .pill{padding:6px 10px;border:1px solid #ddd;border-radius:999px;font-size:12px}
+    .muted{color:#777}
+  </style>
+</head>
+<body>
+  <div id="top">
+    <div class="row">
+      <span class="pill" id="status">Поставь пин: Откуда</span>
+      <span class="pill muted" id="dbg"></span>
+    </div>
+
+    <div class="row" style="width:100%">
+      <input id="phone" placeholder="Телефон +7XXXXXXXXXX" style="flex:1;min-width:220px"/>
+      <input id="name" placeholder="Имя (необязательно)" style="flex:1;min-width:160px"/>
+      <input id="comment" placeholder="Комментарий (необязательно)" style="flex:2;min-width:220px"/>
+    </div>
+
+    <div class="row" style="width:100%">
+      <input id="search" placeholder="Поиск адреса (Вилючинск, улица ...)" style="flex:3;min-width:240px"/>
+      <button id="btnSearch">Найти</button>
+      <button id="btnStep">Смена шага</button>
+      <button id="btnClear">Сброс</button>
+      <button id="btnSend">Отправить в бота</button>
+    </div>
+  </div>
+
+  <div id="map"></div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.expand(); tg.MainButton.hide(); }
+
+const STYLE_URL = (window.TAXI_STYLE_URL || "").trim();
+const API_BASE  = (window.TAXI_API_BASE  || "").trim();
+
+let step = 0; // 0 from, 1 to, 2 points
+let fromPoint = null;
+let toPoints = [];
+let fromMarker = null;
+let toMarkers = [];
+
+function setStatus(){
+  const s = document.getElementById("status");
+  if (step === 0) s.textContent = "Поставь пин: Откуда";
+  else if (step === 1) s.textContent = "Поставь пин: Куда (точка 1)";
+  else s.textContent = "Добавляй промежуточные точки (по желанию)";
+}
+setStatus();
+
+function api(path){ return API_BASE + path; }
+
+async function reverse(lat, lon){
+  const r = await fetch(api(`/api/geo/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`));
+  if (!r.ok) return null;
+  return await r.json();
+}
+async function search(q){
+  const r = await fetch(api(`/api/geo/search?q=${encodeURIComponent(q)}&limit=5`));
+  if (!r.ok) return [];
+  return await r.json();
+}
+async function driversNearby(lat, lon){
+  const r = await fetch(api(`/api/drivers/nearby?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`));
+  if (!r.ok) return [];
+  const j = await r.json();
+  return j.drivers || [];
+}
+
+function clearAll(){
+  step = 0;
+  fromPoint = null;
+  toPoints = [];
+  if (fromMarker) fromMarker.remove();
+  toMarkers.forEach(m=>m.remove());
+  toMarkers = [];
+  setStatus();
+}
+
+function pickPoint(lngLat, address){
+  const lat = lngLat.lat;
+  const lon = lngLat.lng;
+
+  if (step === 0){
+    fromPoint = {address, lat, lon};
+    if (fromMarker) fromMarker.remove();
+    fromMarker = new maplibregl.Marker({color:"#0a0"}).setLngLat([lon,lat]).addTo(map);
+    step = 1;
+  } else if (step === 1){
+    toPoints.push({address, lat, lon});
+    const m = new maplibregl.Marker({color:"#a00"}).setLngLat([lon,lat]).addTo(map);
+    toMarkers.push(m);
+    step = 2;
+  } else {
+    toPoints.push({address, lat, lon});
+    const m = new maplibregl.Marker({color:"#a00"}).setLngLat([lon,lat]).addTo(map);
+    toMarkers.push(m);
+  }
+  setStatus();
+}
+
+const map = new maplibregl.Map({
+  container: 'map',
+  style: STYLE_URL || 'https://demotiles.maplibre.org/style.json',
+  center: [158.40, 52.93],
+  zoom: 11
+});
+map.addControl(new maplibregl.NavigationControl({visualizePitch:true}));
+
+let driverMarkers = [];
+function setDrivers(drivers){
+  driverMarkers.forEach(m=>m.remove());
+  driverMarkers = [];
+  for (const d of drivers){
+    const m = new maplibregl.Marker({color:"#111"})
+      .setLngLat([d.lon, d.lat])
+      .setPopup(new maplibregl.Popup().setText(`Водитель ${d.driver_id} (${d.age_seconds}s)`))
+      .addTo(map);
+    driverMarkers.push(m);
+  }
+}
+
+map.on('click', async (e) => {
+  const lat = e.lngLat.lat;
+  const lon = e.lngLat.lng;
+  const rev = await reverse(lat, lon);
+  const addr = rev?.display_name || `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+  pickPoint(e.lngLat, addr);
+
+  const drv = await driversNearby(lat, lon);
+  setDrivers(drv);
+});
+
+document.getElementById("btnClear").onclick = () => clearAll();
+document.getElementById("btnStep").onclick = () => { step = (step+1)%3; setStatus(); };
+
+document.getElementById("btnSearch").onclick = async () => {
+  const q = document.getElementById("search").value.trim();
+  if (!q) return;
+  const res = await search(q);
+  if (!res.length) { alert("Не найдено"); return; }
+  const best = res[0];
+  const lat = parseFloat(best.lat);
+  const lon = parseFloat(best.lon);
+  map.flyTo({center:[lon,lat], zoom: 15});
+};
+
+document.getElementById("btnSend").onclick = () => {
+  if (!fromPoint || !toPoints.length){
+    alert("Нужно поставить 'Откуда' и 'Куда'");
+    return;
+  }
+  const phone = document.getElementById("phone").value.trim();
+  if (!phone.startsWith("+")) { alert("Телефон должен быть в формате +7..."); return; }
+
+  const payload = {
+    phone,
+    client_name: document.getElementById("name").value.trim(),
+    comment: document.getElementById("comment").value.trim(),
+    from: fromPoint,
+    to: toPoints
+  };
+
+  if (tg){
+    tg.sendData(JSON.stringify(payload));
+    tg.close();
+  } else {
+    console.log(payload);
+    alert("Открыто в браузере. В Telegram MiniApp данные отправятся в бота автоматически.");
+  }
+};
+
+setInterval(async ()=>{
+  if (!fromPoint) return;
+  const drv = await driversNearby(fromPoint.lat, fromPoint.lon);
+  setDrivers(drv);
+}, 5000);
+</script>
+</body>
+</html>

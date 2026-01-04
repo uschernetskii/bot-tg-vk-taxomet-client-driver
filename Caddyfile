@@ -1,0 +1,23 @@
+{$DOMAIN} {
+  encode zstd gzip
+
+  # Miniapp static
+  handle_path /miniapp/* {
+    root * /srv/miniapp
+    file_server
+  }
+
+  # Backend API
+  handle_path /api/* {
+    reverse_proxy backend:8000
+  }
+
+  # VK callback (задел)
+  handle_path /vk/* {
+    reverse_proxy backend:8000
+  }
+
+  handle {
+    respond "OK. Use Telegram bot -> MiniApp at /miniapp/" 200
+  }
+}

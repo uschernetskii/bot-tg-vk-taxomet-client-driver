@@ -1,0 +1,17 @@
+
+# secrets
+.env
+*.env
+
+# local db / volumes
+db/
+*.sqlite3
+
+# python junk
+__pycache__/
+*.pyc
+*.pyo
+
+# editors
+.vscode/
+.idea/
