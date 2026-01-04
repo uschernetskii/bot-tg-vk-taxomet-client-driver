@@ -1,17 +1,18 @@
+# backups
+*.bak.*
+*.bak
+*.backup
+*~
 
-# secrets
-.env
-*.env
+# local scripts/hotfixes
+hotfix_*.sh
+fix_*.sh
 
-# local db / volumes
-db/
-*.sqlite3
-
-# python junk
+# python
 __pycache__/
 *.pyc
 *.pyo
 
-# editors
-.vscode/
-.idea/
+# env
+.env
+.env.*
