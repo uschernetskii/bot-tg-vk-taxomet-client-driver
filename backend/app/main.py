@@ -57,9 +57,8 @@ def must_internal(request: Request):
 
 
 async def _ensure_users_schema(pool):
-  # ВАЖНО: без CHECK, и отдельными командами (так надёжнее)
-  stmts = [
-    """
+    # отдельными запросами, чтобы не словить "склейку" строк/запятых
+    create_sql = """
     CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
       tg_id BIGINT UNIQUE,
@@ -70,13 +69,15 @@ async def _ensure_users_schema(pool):
       created_at TIMESTAMPTZ DEFAULT now(),
       updated_at TIMESTAMPTZ DEFAULT now()
     );
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);",
-    "CREATE INDEX IF NOT EXISTS idx_users_vk_id ON users(vk_id);",
-  ]
-  async with pool.acquire() as conn:
-    for q in stmts:
-      await conn.execute(q)
+    """
+    idx1 = "CREATE INDEX IF NOT EXISTS idx_users_tg_id ON users(tg_id);"
+    idx2 = "CREATE INDEX IF NOT EXISTS idx_users_vk_id ON users(vk_id);"
+    async with pool.acquire() as conn:
+        await conn.execute(create_sql)
+        await conn.execute(idx1)
+        await conn.execute(idx2)
+
+
 
 
 async def tg_send(chat_id: int, text: str):
