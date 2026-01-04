@@ -1,7 +1,7 @@
 import os
 from fastapi import APIRouter, Request, Header, HTTPException
 from fastapi import HTTPException, Header, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
